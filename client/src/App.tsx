@@ -1,17 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import './App.css'
-import {
-  Repo,
-  WebSocketClientAdapter,
-} from "@automerge/react";
-import type { DocHandle } from "@automerge/automerge-repo";
-
-// Create a single Repo instance connected to Automerge's public sync server
-const repo = new Repo({
-  network: [
-    new WebSocketClientAdapter("wss://sync.automerge.org"),
-  ],
-});
+import * as Automerge from "@automerge/automerge";
 
 interface Doc {
   text: string;
@@ -23,6 +12,11 @@ function getDocumentIdFromUrl(): string | null {
   return params.get('doc');
 }
 
+// Helper function to generate a new document ID
+function generateDocumentId(): string {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
+
 // Helper function to update URL with document ID
 function updateUrlWithDocumentId(docId: string) {
   const url = new URL(window.location.href);
@@ -31,80 +25,137 @@ function updateUrlWithDocumentId(docId: string) {
 }
 
 function App() {
-  const [handle, setHandle] = useState<DocHandle<Doc> | null>(null);
   const [text, setText] = useState("");
+  const docRef = useRef<Automerge.Doc<Doc> | null>(null);
+  const syncStateRef = useRef<Automerge.SyncState | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const sendSyncMessageRef = useRef<(() => void) | null>(null);
 
-  // Initialize document handle
+  // Initialize document and websocket connection
   useEffect(() => {
     let isMounted = true;
 
-    async function initDoc() {
-      // Check if document ID is in URL
-      const urlDocId = getDocumentIdFromUrl();
-      
-      if (urlDocId) {
-        // Use document ID from URL
-        try {
-          const docHandle = await repo.find<Doc>(urlDocId as any);
-          await docHandle.whenReady();
-          
-          if (isMounted) {
-            setHandle(docHandle);
-            
-            const doc = docHandle.docSync();
-            if (doc) {
-              setText(doc.text || "");
-            } else {
-              docHandle.change((doc: Doc) => {
-                if (!doc.text) {
-                  doc.text = "";
-                }
-              });
-            }
-            
-            // Listen for changes from other clients
-            docHandle.on("change", () => {
-              if (isMounted) {
-                const updatedDoc = docHandle.docSync();
-                if (updatedDoc && updatedDoc.text !== undefined) {
-                  setText(updatedDoc.text);
-                }
-              }
-            });
-          }
-        } catch (error) {
-          console.error("Error loading document from URL:", error);
-          // If document can't be loaded, create a new one
-          const docHandle = repo.create<Doc>();
-          docHandle.change((doc: Doc) => {
-            doc.text = "";
-          });
-          
-          if (isMounted) {
-            setHandle(docHandle);
-            // Update URL with new document ID
-            updateUrlWithDocumentId(docHandle.url);
-          }
-        }
-      } else {
-        // No document ID in URL, create a new document
-        const docHandle = repo.create<Doc>();
-        docHandle.change((doc: Doc) => {
-          doc.text = "";
-        });
-        
-        if (isMounted) {
-          setHandle(docHandle);
-          // Update URL with new document ID
-          updateUrlWithDocumentId(docHandle.url);
-        }
+    // Check if document ID is in URL
+    let urlDocId = getDocumentIdFromUrl();
+    
+    if (!urlDocId) {
+      // Generate a new document ID
+      urlDocId = generateDocumentId();
+      updateUrlWithDocumentId(urlDocId);
+    }
+    
+    // Initialize Automerge document
+    let doc = Automerge.init<Doc>();
+    doc = Automerge.change(doc, (d: Doc) => {
+      d.text = "";
+    });
+    const syncState = Automerge.initSyncState();
+    
+    docRef.current = doc;
+    syncStateRef.current = syncState;
+
+    // Initialize text from document
+    if (doc.text) {
+      setText(doc.text);
+    }
+
+    // Connect to backend websocket
+    const wsUrl = `ws://localhost:8080/document/${urlDocId}`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.binaryType = 'arraybuffer';
+
+    function sendSyncMessage() {
+      if (!docRef.current || !syncStateRef.current || !isMounted) {
+        return;
+      }
+
+      if (ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      const [newSyncState, syncMessage] = Automerge.generateSyncMessage(
+        docRef.current,
+        syncStateRef.current
+      );
+
+      if (syncMessage) {
+        syncStateRef.current = newSyncState;
+        // Send as binary
+        ws.send(syncMessage);
       }
     }
 
-    initDoc();
+    function receiveSyncMessage(message: Uint8Array) {
+      if (!docRef.current || !syncStateRef.current || !isMounted) {
+        return;
+      }
+
+      const [newDoc, newSyncState] = Automerge.receiveSyncMessage(
+        docRef.current,
+        syncStateRef.current,
+        message
+      );
+
+      docRef.current = newDoc;
+      syncStateRef.current = newSyncState;
+
+      // Update UI if text changed
+      if (isMounted && newDoc.text !== undefined) {
+        setText(newDoc.text || "");
+      }
+
+      // Send a sync message back if needed
+      sendSyncMessage();
+    }
+
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+      // Send initial sync message
+      sendSyncMessage();
+    };
+
+    ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        // Convert ArrayBuffer to Uint8Array
+        const message = new Uint8Array(event.data);
+        receiveSyncMessage(message);
+      } else {
+        console.warn('Received non-ArrayBuffer message:', event.data);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = (event) => {
+      console.log('WebSocket disconnected', {
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean
+      });
+    };
+
+    // Store sendSyncMessage function for use in handleChange
+    sendSyncMessageRef.current = sendSyncMessage;
+
+    // Periodically send sync messages (in case we have changes to sync)
+    const syncInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        sendSyncMessage();
+      }
+    }, 1000);
 
     return () => {
+      console.log('Cleaning up WebSocket connection');
       isMounted = false;
+      clearInterval(syncInterval);
+      if (ws && ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(1000, 'Component unmounting');
+      }
+      sendSyncMessageRef.current = null;
     };
   }, []);
 
@@ -113,15 +164,15 @@ function App() {
     setText(newText);
     
     // Update the Automerge document
-    if (handle) {
-      // Update URL with document ID if not already set (happens on first keystroke)
-      if (!getDocumentIdFromUrl()) {
-        updateUrlWithDocumentId(handle.url);
-      }
-      
-      handle.change((doc: Doc) => {
+    if (docRef.current) {
+      docRef.current = Automerge.change(docRef.current, (doc: Doc) => {
         doc.text = newText;
       });
+
+      // Trigger sync message send
+      if (sendSyncMessageRef.current) {
+        sendSyncMessageRef.current();
+      }
     }
   };
 
