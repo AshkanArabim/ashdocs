@@ -14,9 +14,15 @@ type userReadLoopResult struct {
 	b   []byte
 	err error
 }
+
 type userChangeAndConnType struct {
 	authorConn *websocket.Conn
 	bytes      []byte // cuz func (*SyncState) ReceiveMessage receives bytes
+}
+
+type connAndDocId struct {
+	conn  *websocket.Conn
+	docId string
 }
 
 func wsReadLoop(ctx context.Context, conn *websocket.Conn, readUserChanges chan userReadLoopResult) {
@@ -28,20 +34,23 @@ func wsReadLoop(ctx context.Context, conn *websocket.Conn, readUserChanges chan 
 		readUserChanges <- userReadLoopResult{mt, b, err}
 
 		if err != nil {
-			fmt.Println(err.Error())
+			// error message printed in parent process
 			return
 		}
 	}
 }
 
 // each connected user has an instance of this func running
-func userLoop(conn *websocket.Conn, serverChanges chan *automerge.SyncMessage, userChangesAndConn chan userChangeAndConnType) {
-	// FIXME: handle deliberate disconnection
+func userLoop(conn *websocket.Conn, serverChanges chan *automerge.SyncMessage, userChangesAndConn chan userChangeAndConnType, leavingConns chan *websocket.Conn) {
 	// FIXME: close the connections / channels passed here from the owner process
+
+	// notify docLoop when connection is terminated
+	defer conn.CloseNow()
+	defer func() { leavingConns <- conn }()
 
 	// TODO: figure out a better context solution
 	ctx := context.Background()
-	readUserChanges := make(chan userReadLoopResult, 5)
+	readUserChanges := make(chan userReadLoopResult, 5) // closed inside wsReadLoop
 	go wsReadLoop(ctx, conn, readUserChanges)
 
 	for {
@@ -55,7 +64,9 @@ func userLoop(conn *websocket.Conn, serverChanges chan *automerge.SyncMessage, u
 			b := readUserChange.b
 			err := readUserChange.err
 			if err != nil {
-				fmt.Println(err.Error())
+				if websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+					fmt.Println("User WS connection closed with error:", err.Error())
+				}
 				return
 			}
 
@@ -67,14 +78,19 @@ func userLoop(conn *websocket.Conn, serverChanges chan *automerge.SyncMessage, u
 
 // every document has an instance of this func running.
 // will also launch instances of userLoop for every user that connects to this doc
-func docLoop(joiningConns chan *websocket.Conn, leavingConns chan *websocket.Conn) {
+func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs chan string) {
+	defer func() { dyingDocLoopIDs <- docId }()
+
 	// set up automerge server
 	// since all in memory, starting with blank doc & syncstate
 	// TODO: add persistence here
+	// TODO: afer persistence, exit routine if no users connected
 	doc := automerge.New()
 	syncstate := automerge.NewSyncState(doc)
 	userChangesAndConn := make(chan userChangeAndConnType, 10)
 	defer close(userChangesAndConn)
+	leavingConns := make(chan *websocket.Conn, 10)
+	defer close(leavingConns)
 
 	// loop for adding / removing users & merging / broadcasting changes
 	wsConnInputs := make(map[*websocket.Conn]chan *automerge.SyncMessage)
@@ -82,7 +98,7 @@ func docLoop(joiningConns chan *websocket.Conn, leavingConns chan *websocket.Con
 		select {
 		case conn := <-joiningConns:
 			wsConnInputs[conn] = make(chan *automerge.SyncMessage, 10)
-			go userLoop(conn, wsConnInputs[conn], userChangesAndConn)
+			go userLoop(conn, wsConnInputs[conn], userChangesAndConn, leavingConns)
 
 		case conn := <-leavingConns:
 			close(wsConnInputs[conn])
@@ -103,27 +119,68 @@ func docLoop(joiningConns chan *websocket.Conn, leavingConns chan *websocket.Con
 	}
 }
 
-// FIXME: handle the case when HandleUserConn returns. TBD if both failure or also clean close
-// accepts user WS connection and starts goroutine to send / receive changes
-func acceptUserConnection(w http.ResponseWriter, r *http.Request) {
-	// upgrade to websocket
-	conn, err := websocket.Accept(w, r, nil)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
+// stores info about running docLoops
+// receives a user connection through channel
+// creates docLoop for the target document if it doesn't exist
+// passes the user connection to the doc loop
+func docLoopManager(connsAndDocIds chan connAndDocId) {
+	// channel to notify when a docloop dies
+	dyingDocLoopIds := make(chan string, 10)
+
+	// maps doc IDs to their respective joiningConns channel
+	docLoops := map[string]chan *websocket.Conn{}
+
+	// loop to listen on new connections
+	for {
+		select {
+		case newConnAndDocId := <-connsAndDocIds:
+			// create docLoop if DNE
+			_, ok := docLoops[newConnAndDocId.docId]
+			if !ok {
+				// add to dict
+				joiningConns := make(chan *websocket.Conn)
+				docLoops[newConnAndDocId.docId] = joiningConns
+
+				// start the docloop
+				go docLoop(joiningConns, newConnAndDocId.docId, dyingDocLoopIds)
+			}
+
+			// send the connection to the docloop
+			docLoops[newConnAndDocId.docId] <- newConnAndDocId.conn
+
+		case dyingDocLoopId := <-dyingDocLoopIds:
+			// clear docloop resources
+
+			close(docLoops[dyingDocLoopId])
+			delete(docLoops, dyingDocLoopId)
+		}
 	}
-	// FIXME: figure out when to close the connection
-
-	// launch user connection handler goroutine
-	// TODO:
-
 }
 
 func main() {
 	// set up server
 	const addr = ":8080"
 
+	// start doc loop manager
+	connsAndDocIds := make(chan connAndDocId)
+	go docLoopManager(connsAndDocIds)
+
 	mux := http.NewServeMux() // mux pointer
+
+	// accepts user WS connection and starts goroutine to send / receive changes
+	mux.HandleFunc("/document/{docId}", func(w http.ResponseWriter, r *http.Request) {
+		// upgrade to websocket
+		// conn will be closed by the userLoop when it does
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+
+		// send connection to doc manager
+		connsAndDocIds <- connAndDocId{conn, r.PathValue("docId")}
+	})
+
 	s := &http.Server{
 		Addr:    addr,
 		Handler: mux,
