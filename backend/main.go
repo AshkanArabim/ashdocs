@@ -26,8 +26,6 @@ type connAndDocId struct {
 }
 
 func wsReadLoop(ctx context.Context, conn *websocket.Conn, readUserChanges chan userReadLoopResult) {
-	defer close(readUserChanges)
-
 	// loop to read continuously
 	for {
 		mt, b, err := conn.Read(ctx)
@@ -42,15 +40,14 @@ func wsReadLoop(ctx context.Context, conn *websocket.Conn, readUserChanges chan 
 
 // each connected user has an instance of this func running
 func userLoop(conn *websocket.Conn, serverChanges chan *automerge.SyncMessage, userChangesAndConn chan userChangeAndConnType, leavingConns chan *websocket.Conn) {
-	// FIXME: close the connections / channels passed here from the owner process
-
 	// notify docLoop when connection is terminated
 	defer conn.CloseNow()
 	defer func() { leavingConns <- conn }()
 
 	// TODO: figure out a better context solution
 	ctx := context.Background()
-	readUserChanges := make(chan userReadLoopResult, 5) // closed inside wsReadLoop
+	readUserChanges := make(chan userReadLoopResult, 5)
+  defer close(readUserChanges)
 	go wsReadLoop(ctx, conn, readUserChanges)
 
 	for {
@@ -97,6 +94,7 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	for {
 		select {
 		case conn := <-joiningConns:
+      // closed when userLoop dies
 			wsConnInputs[conn] = make(chan *automerge.SyncMessage, 10)
 			go userLoop(conn, wsConnInputs[conn], userChangesAndConn, leavingConns)
 
@@ -126,6 +124,7 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 func docLoopManager(connsAndDocIds chan connAndDocId) {
 	// channel to notify when a docloop dies
 	dyingDocLoopIds := make(chan string, 10)
+  defer close(dyingDocLoopIds)
 
 	// maps doc IDs to their respective joiningConns channel
 	docLoops := map[string]chan *websocket.Conn{}
@@ -138,11 +137,12 @@ func docLoopManager(connsAndDocIds chan connAndDocId) {
 			_, ok := docLoops[newConnAndDocId.docId]
 			if !ok {
 				// add to dict
+        // closed when docLoop dies
 				joiningConns := make(chan *websocket.Conn)
 				docLoops[newConnAndDocId.docId] = joiningConns
 
 				// start the docloop
-				go docLoop(joiningConns, newConnAndDocId.docId, dyingDocLoopIds)
+				go docLoop(docLoops[newConnAndDocId.docId], newConnAndDocId.docId, dyingDocLoopIds)
 			}
 
 			// send the connection to the docloop
