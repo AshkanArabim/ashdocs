@@ -47,8 +47,8 @@ func userLoop(conn *websocket.Conn, serverChanges chan *automerge.SyncMessage, u
 
 	// TODO: figure out a better context solution
 	ctx := context.Background()
-	readUserChanges := make(chan userReadLoopResult, 5)
-  defer close(readUserChanges)
+	readUserChanges := make(chan userReadLoopResult, 16)
+	defer close(readUserChanges)
 	go wsReadLoop(ctx, conn, readUserChanges)
 
 	for {
@@ -85,9 +85,9 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	// TODO: afer persistence, exit routine if no users connected
 	doc := automerge.New()
 	syncstate := automerge.NewSyncState(doc)
-	userChangesAndConn := make(chan userChangeAndConnType, 10)
+	userChangesAndConn := make(chan userChangeAndConnType, 16)
 	defer close(userChangesAndConn)
-	leavingConns := make(chan *websocket.Conn, 10)
+	leavingConns := make(chan *websocket.Conn, 16)
 	defer close(leavingConns)
 
 	// loop for adding / removing users & merging / broadcasting changes
@@ -95,8 +95,8 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	for {
 		select {
 		case conn := <-joiningConns:
-      // closed when userLoop dies
-			wsConnInputs[conn] = make(chan *automerge.SyncMessage, 10)
+			// closed when userLoop dies
+			wsConnInputs[conn] = make(chan *automerge.SyncMessage, 16)
 			go userLoop(conn, wsConnInputs[conn], userChangesAndConn, leavingConns)
 
 		case conn := <-leavingConns:
@@ -124,8 +124,8 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 // passes the user connection to the doc loop
 func docLoopManager(connsAndDocIds chan connAndDocId) {
 	// channel to notify when a docloop dies
-	dyingDocLoopIds := make(chan string, 10)
-  defer close(dyingDocLoopIds)
+	dyingDocLoopIds := make(chan string, 16)
+	defer close(dyingDocLoopIds)
 
 	// maps doc IDs to their respective joiningConns channel
 	docLoops := map[string]chan *websocket.Conn{}
@@ -138,8 +138,8 @@ func docLoopManager(connsAndDocIds chan connAndDocId) {
 			_, ok := docLoops[newConnAndDocId.docId]
 			if !ok {
 				// add to dict
-        // closed when docLoop dies
-				joiningConns := make(chan *websocket.Conn)
+				// closed when docLoop dies
+				joiningConns := make(chan *websocket.Conn, 16)
 				docLoops[newConnAndDocId.docId] = joiningConns
 
 				// start the docloop
@@ -163,7 +163,7 @@ func main() {
 	const addr = ":8080"
 
 	// start doc loop manager
-	connsAndDocIds := make(chan connAndDocId)
+	connsAndDocIds := make(chan connAndDocId, 16)
 	go docLoopManager(connsAndDocIds)
 
 	mux := http.NewServeMux() // mux pointer
