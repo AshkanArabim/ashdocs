@@ -46,18 +46,9 @@ function App() {
     
     // Initialize Automerge document
     let doc = Automerge.init<Doc>();
-    doc = Automerge.change(doc, (d: Doc) => {
-      d.text = "";
-    });
     const syncState = Automerge.initSyncState();
-    
     docRef.current = doc;
     syncStateRef.current = syncState;
-
-    // Initialize text from document
-    if (doc.text) {
-      setText(doc.text);
-    }
 
     // Connect to backend websocket
     const wsUrl = `ws://localhost:8080/document/${urlDocId}`;
@@ -126,8 +117,7 @@ function App() {
 
     ws.onopen = () => {
       console.log('WebSocket connected');
-      // Send initial sync message
-      sendSyncMessage();
+      // nothing to do here. server will send initial document content when connection opens
     };
 
     ws.onmessage = (event) => {
@@ -155,17 +145,9 @@ function App() {
     // Store sendSyncMessage function for use in handleChange
     sendSyncMessageRef.current = sendSyncMessage;
 
-    // Periodically send sync messages (in case we have changes to sync)
-    const syncInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        sendSyncMessage();
-      }
-    }, 1000);
-
     return () => {
       console.log('Cleaning up WebSocket connection');
       isMounted = false;
-      clearInterval(syncInterval);
       if (ws && ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close(1000, 'Component unmounting');
       }
@@ -186,11 +168,9 @@ function App() {
       });
       console.log('handleChange: document updated, changed:', oldDoc !== docRef.current);
 
-      // IMPORTANT: After making a local change, we need to reset the sync state
-      // to ensure it recognizes we have new changes to send to the server.
-      // The old sync state was tracking what the server knew before this change.
-      syncStateRef.current = Automerge.initSyncState();
-      console.log('handleChange: sync state reset');
+      // DO NOT reset the sync state! The sync state tracks what the server knows.
+      // generateSyncMessage will automatically detect that our document has changed
+      // and include the new changes in the sync message.
 
       // Trigger sync message send
       if (sendSyncMessageRef.current) {
