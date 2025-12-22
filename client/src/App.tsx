@@ -61,6 +61,7 @@ function App() {
 
     // Connect to backend websocket
     const wsUrl = `ws://localhost:8080/document/${urlDocId}`;
+    console.log('Connecting to WebSocket:', wsUrl);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
@@ -68,10 +69,12 @@ function App() {
 
     function sendSyncMessage() {
       if (!docRef.current || !syncStateRef.current || !isMounted) {
+        console.log('sendSyncMessage: skipping - refs not ready');
         return;
       }
 
       if (ws.readyState !== WebSocket.OPEN) {
+        console.log('sendSyncMessage: skipping - WebSocket not open', ws.readyState);
         return;
       }
 
@@ -80,10 +83,14 @@ function App() {
         syncStateRef.current
       );
 
+      syncStateRef.current = newSyncState;
+
       if (syncMessage) {
-        syncStateRef.current = newSyncState;
+        console.log('sendSyncMessage: sending message', syncMessage.byteLength, 'bytes');
         // Send as binary
         ws.send(syncMessage);
+      } else {
+        console.log('sendSyncMessage: no message to send (already in sync)');
       }
     }
 
@@ -91,6 +98,8 @@ function App() {
       if (!docRef.current || !syncStateRef.current || !isMounted) {
         return;
       }
+
+      console.log('receiveSyncMessage: processing message', message.byteLength, 'bytes');
 
       const [newDoc, newSyncState] = Automerge.receiveSyncMessage(
         docRef.current,
@@ -103,7 +112,12 @@ function App() {
 
       // Update UI if text changed
       if (isMounted && newDoc.text !== undefined) {
-        setText(newDoc.text || "");
+        const oldText = text;
+        const newText = newDoc.text || "";
+        if (oldText !== newText) {
+          console.log('receiveSyncMessage: text changed from', oldText.length, 'to', newText.length, 'chars');
+          setText(newText);
+        }
       }
 
       // Send a sync message back if needed
@@ -161,17 +175,29 @@ function App() {
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newText = e.target.value;
+    console.log('handleChange: user typed, new length:', newText.length);
     setText(newText);
     
     // Update the Automerge document
-    if (docRef.current) {
+    if (docRef.current && syncStateRef.current) {
+      const oldDoc = docRef.current;
       docRef.current = Automerge.change(docRef.current, (doc: Doc) => {
         doc.text = newText;
       });
+      console.log('handleChange: document updated, changed:', oldDoc !== docRef.current);
+
+      // IMPORTANT: After making a local change, we need to reset the sync state
+      // to ensure it recognizes we have new changes to send to the server.
+      // The old sync state was tracking what the server knew before this change.
+      syncStateRef.current = Automerge.initSyncState();
+      console.log('handleChange: sync state reset');
 
       // Trigger sync message send
       if (sendSyncMessageRef.current) {
+        console.log('handleChange: triggering sync');
         sendSyncMessageRef.current();
+      } else {
+        console.warn('handleChange: sendSyncMessageRef is null!');
       }
     }
   };
