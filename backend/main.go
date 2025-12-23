@@ -18,11 +18,6 @@ type userReadLoopResult struct {
 	err error
 }
 
-type userChangeAndConnType struct {
-	authorConn *websocket.Conn
-	bytes      []byte // cuz func (*SyncState) ReceiveMessage receives bytes
-}
-
 type connAndDocId struct {
 	conn  *websocket.Conn
 	docId string
@@ -44,7 +39,7 @@ func wsReadLoop(ctx context.Context, conn *websocket.Conn, readUserChanges chan 
 }
 
 // each connected user has an instance of this func running
-func userLoop(conn *websocket.Conn, serverChanged chan struct{}, syncStateGetter func() *automerge.SyncState, userChangesAndConn chan userChangeAndConnType, leavingConns chan *websocket.Conn) {
+func userLoop(conn *websocket.Conn, serverChanged chan struct{}, syncState *automerge.SyncState, userChanged chan struct{}, leavingConns chan *websocket.Conn) {
 	slog.Debug("userLoop: starting", "conn", fmt.Sprintf("%p", conn))
 	// notify docLoop when connection is terminated
 	defer conn.CloseNow()
@@ -64,8 +59,7 @@ func userLoop(conn *websocket.Conn, serverChanged chan struct{}, syncStateGetter
 		case <-serverChanged:
 			// send broadcast changes sent by the server; send to user
 			// Get the current syncstate from docLoop
-			syncstate := syncStateGetter()
-			msg, valid := syncstate.GenerateMessage()
+			msg, valid := syncState.GenerateMessage()
 
 			if valid {
 				bytes := msg.Bytes()
@@ -93,9 +87,21 @@ func userLoop(conn *websocket.Conn, serverChanged chan struct{}, syncStateGetter
 				return
 			}
 
-			// send syncmessage to doc handler
-			slog.Debug("userLoop: forwarding user change to doc handler", "conn", fmt.Sprintf("%p", conn), "bytesLength", len(b))
-			userChangesAndConn <- userChangeAndConnType{conn, b}
+			// merge changes
+			// internally locks the doc, so no risk of race conditions
+			// see https://pkg.go.dev/github.com/automerge/automerge-go#SyncState.ReceiveMessage
+			_, err = syncState.ReceiveMessage(b)
+			if err != nil {
+				slog.Error("userLoop: failed to receive syncstate message.", "error", err.Error())
+				continue
+			}
+			slog.Debug("userLoop: changes merged into doc")
+
+			// notify server of a change (nonblocking)
+			select {
+			case userChanged <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -116,11 +122,8 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	doc := automerge.New()
 	slog.Debug("docLoop: initialized automerge doc", "docId", docId)
 
-	// Each connection gets its own syncstate to track what that peer knows
-	syncStates := make(map[*websocket.Conn]*automerge.SyncState)
-
-	userChangesAndConn := make(chan userChangeAndConnType, 16)
-	defer close(userChangesAndConn)
+	userChanged := make(chan struct{}, 1)
+	defer close(userChanged)
 	leavingConns := make(chan *websocket.Conn, 16)
 	defer close(leavingConns)
 
@@ -130,41 +133,22 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 		select {
 		case conn := <-joiningConns:
 			// Create a syncstate for this connection
-			syncStates[conn] = automerge.NewSyncState(doc)
+			syncState := automerge.NewSyncState(doc)
 			slog.Debug("docLoop: user joining", "docId", docId, "conn", fmt.Sprintf("%p", conn), "activeConnections", len(changeNotif)+1)
 
 			changeNotif[conn] = make(chan struct{}, 1)
 			changeNotif[conn] <- struct{}{} // immediate sync on connection establishment
 
-			// Create a getter function that returns this connection's syncstate
-			syncStateGetter := func() *automerge.SyncState {
-				return syncStates[conn]
-			}
-			go userLoop(conn, changeNotif[conn], syncStateGetter, userChangesAndConn, leavingConns)
+			go userLoop(conn, changeNotif[conn], syncState, userChanged, leavingConns)
 
 		case conn := <-leavingConns:
 			slog.Debug("docLoop: user leaving", "docId", docId, "conn", fmt.Sprintf("%p", conn), "activeConnections", len(changeNotif)-1)
 			close(changeNotif[conn])
 			delete(changeNotif, conn)
-			delete(syncStates, conn)
 
-		case userChangeAndConn := <-userChangesAndConn:
+		case <-userChanged:
 			// Receive the message using the author's syncstate
-			slog.Debug("docLoop: receiving user change", "docId", docId, "authorConn", fmt.Sprintf("%p", userChangeAndConn.authorConn), "bytesLength", len(userChangeAndConn.bytes))
-
-			authorSyncState := syncStates[userChangeAndConn.authorConn]
-			if authorSyncState == nil {
-				slog.Error("docLoop: no syncstate for author connection", "docId", docId)
-				continue
-			}
-
-			_, err := authorSyncState.ReceiveMessage(userChangeAndConn.bytes)
-			if err != nil {
-				slog.Error("docLoop: error receiving sync message", "docId", docId, "error", err.Error())
-				continue
-			}
-
-			slog.Debug("docLoop: changes merged into doc", "content", doc.Root().GoString())
+			slog.Debug("docLoop: a user has changed the doc", "docId", docId, "content", doc.Root().GoString())
 
 			// Notify ALL users (including the author) that there's an update
 			// The sync protocol requires bidirectional communication:
