@@ -46,21 +46,13 @@ function App() {
     
     // Initialize Automerge document
     let doc = Automerge.init<Doc>();
-    doc = Automerge.change(doc, (d: Doc) => {
-      d.text = "";
-    });
     const syncState = Automerge.initSyncState();
-    
     docRef.current = doc;
     syncStateRef.current = syncState;
 
-    // Initialize text from document
-    if (doc.text) {
-      setText(doc.text);
-    }
-
     // Connect to backend websocket
     const wsUrl = `ws://localhost:8080/document/${urlDocId}`;
+    console.log('Connecting to WebSocket:', wsUrl);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
@@ -68,10 +60,12 @@ function App() {
 
     function sendSyncMessage() {
       if (!docRef.current || !syncStateRef.current || !isMounted) {
+        console.log('sendSyncMessage: skipping - refs not ready');
         return;
       }
 
       if (ws.readyState !== WebSocket.OPEN) {
+        console.log('sendSyncMessage: skipping - WebSocket not open', ws.readyState);
         return;
       }
 
@@ -80,10 +74,14 @@ function App() {
         syncStateRef.current
       );
 
+      syncStateRef.current = newSyncState;
+
       if (syncMessage) {
-        syncStateRef.current = newSyncState;
+        console.log('sendSyncMessage: sending message', syncMessage.byteLength, 'bytes');
         // Send as binary
         ws.send(syncMessage);
+      } else {
+        console.log('sendSyncMessage: no message to send (already in sync)');
       }
     }
 
@@ -91,6 +89,8 @@ function App() {
       if (!docRef.current || !syncStateRef.current || !isMounted) {
         return;
       }
+
+      console.log('receiveSyncMessage: processing message', message.byteLength, 'bytes');
 
       const [newDoc, newSyncState] = Automerge.receiveSyncMessage(
         docRef.current,
@@ -103,7 +103,12 @@ function App() {
 
       // Update UI if text changed
       if (isMounted && newDoc.text !== undefined) {
-        setText(newDoc.text || "");
+        const oldText = text;
+        const newText = newDoc.text || "";
+        if (oldText !== newText) {
+          console.log('receiveSyncMessage: text changed from', oldText.length, 'to', newText.length, 'chars');
+          setText(newText);
+        }
       }
 
       // Send a sync message back if needed
@@ -112,8 +117,7 @@ function App() {
 
     ws.onopen = () => {
       console.log('WebSocket connected');
-      // Send initial sync message
-      sendSyncMessage();
+      // nothing to do here. server will send initial document content when connection opens
     };
 
     ws.onmessage = (event) => {
@@ -141,17 +145,9 @@ function App() {
     // Store sendSyncMessage function for use in handleChange
     sendSyncMessageRef.current = sendSyncMessage;
 
-    // Periodically send sync messages (in case we have changes to sync)
-    const syncInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        sendSyncMessage();
-      }
-    }, 1000);
-
     return () => {
       console.log('Cleaning up WebSocket connection');
       isMounted = false;
-      clearInterval(syncInterval);
       if (ws && ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close(1000, 'Component unmounting');
       }
@@ -161,17 +157,27 @@ function App() {
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newText = e.target.value;
+    console.log('handleChange: user typed, new length:', newText.length);
     setText(newText);
     
     // Update the Automerge document
-    if (docRef.current) {
+    if (docRef.current && syncStateRef.current) {
+      const oldDoc = docRef.current;
       docRef.current = Automerge.change(docRef.current, (doc: Doc) => {
         doc.text = newText;
       });
+      console.log('handleChange: document updated, changed:', oldDoc !== docRef.current);
+
+      // DO NOT reset the sync state! The sync state tracks what the server knows.
+      // generateSyncMessage will automatically detect that our document has changed
+      // and include the new changes in the sync message.
 
       // Trigger sync message send
       if (sendSyncMessageRef.current) {
+        console.log('handleChange: triggering sync');
         sendSyncMessageRef.current();
+      } else {
+        console.warn('handleChange: sendSyncMessageRef is null!');
       }
     }
   };
