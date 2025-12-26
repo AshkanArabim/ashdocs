@@ -12,3 +12,15 @@ Based on how automerge-repo's storage system and storage adapters work:
 - stored changes tracked in `storedHeads` as "doc -> heads" map
 - storage keys are hierarchical: `[<docId>, "snapshot"/"incremental", <hash>]`
   - e.g. querying `[<docId>, "incremental"]` gives instant access to all incremental saves for quick deletion on snapshot creation
+
+## foundationdb vs pebble
+ended up going with foundation
+
+- fdb
+  - distributed systems built in
+  - hierarchical keys built in
+    - MUCH easier to use
+  - blob limit: 100kb
+- pebble
+  - easier integration with golang; literally just a package
+  - blob limit = 4gb
