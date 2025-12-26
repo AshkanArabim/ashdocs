@@ -8,7 +8,6 @@ import (
 	"os"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
-	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
 	"github.com/automerge/automerge-go"
 	"github.com/coder/websocket"
 	"github.com/rs/cors"
@@ -127,42 +126,10 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	// TODO: afer persistence, exit docLoop if no users connected
 	slog.Debug("docLoop: initialized automerge doc", "docId", docId)
 
-	// load doc from DB if it exists
-	// blank document if not previously saved
-	slog.Debug("docLoop: attempting to load doc from DB", "docId", docId)
-	docInterface, err := db.Transact(func(t fdb.Transaction) (interface{}, error) {
-		// load doc snapshot if exists
-		val := t.Get(tuple.Tuple{docId, "snapshot"}.FDBKey()).MustGet()
-		doc := automerge.New() // blank doc if snapshot DNE
-		if val != nil {
-			doc, err = automerge.Load(val)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		// apply all incremental changes on top of snapshot if they exist
-		pr, err := fdb.PrefixRange(tuple.Tuple{docId, "changes"}.Pack())
-		if err != nil {
-			return nil, err
-		}
-		kvs := t.GetRange(pr, fdb.RangeOptions{}).GetSliceOrPanic()
-		for _, kv := range kvs {
-			// assuming loop won't run if size of prefix range is 0
-			err := doc.LoadIncremental(kv.Value)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		return doc, nil
-	})
+	// load doc from DB if it exists, or create a new blank document
+	doc, err := createOrLoadDoc(db, docId)
 	if err != nil {
-		return fmt.Errorf("docLoop: failed to load doc from DB: %w", err)
-	}
-	doc, ok := docInterface.(*automerge.Doc)
-	if !ok {
-		return fmt.Errorf("docLoop: unexpected type from DB transaction")
+		return fmt.Errorf("docLoop: failed to load doc: %w", err)
 	}
 
 	// loop for adding / removing users & merging / broadcasting changes
