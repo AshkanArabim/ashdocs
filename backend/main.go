@@ -170,6 +170,11 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 				broadcastCount++
 			}
 			slog.Debug("docLoop: broadcast complete", "docId", docId, "recipients", broadcastCount)
+
+			saveDocChanges(db, docId, doc)
+			if err != nil {
+				slog.Error("docLoop: failed to save doc changes", "docId", docId, "error", err)
+			}
 		}
 	}
 }
