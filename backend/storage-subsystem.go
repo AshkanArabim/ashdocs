@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"
@@ -71,11 +73,42 @@ func deleteDoc(db *fdb.Database, docId string) error {
 	return nil
 }
 
+var lastSaveTimes = make(map[string]time.Time)
+
 // saveDocChanges saves document changes to the database.
 // This function should be throttled and periodically create snapshots.
 // It saves the most recent changes and periodically creates snapshots for efficiency.
-// TODO: implement this function
 func saveDocChanges(db *fdb.Database, docId string, doc *automerge.Doc) error {
-	// TODO: implement throttled change saving with periodic snapshots
-	return fmt.Errorf("saveDocChanges: not yet implemented")
+	// Throttle: return early if called within 100ms of last save for this docId
+	lastSave, exists := lastSaveTimes[docId]
+	now := time.Now()
+	if exists && now.Sub(lastSave) < 100*time.Millisecond {
+		slog.Debug("saveDocChanges: throttled, skipping save", "docId", docId, "timeSinceLastSave", now.Sub(lastSave))
+		return nil
+	}
+	lastSaveTimes[docId] = now
+
+	slog.Debug("saveDocChanges: proceeding with save", "docId", docId)
+
+	// using SaveIncremental. will consider other methods if this doesn't work
+	_, err := db.Transact(func(t fdb.Transaction) (interface{}, error) {
+		// update / create iterator for this doc
+		// Increment by 1 (64-bit little-endian)
+		t.Add(tuple.Tuple{docId, "seq"}.FDBKey(), []byte{1, 0, 0, 0, 0, 0, 0, 0})
+
+		// get the new seq
+		bytes := t.Get(tuple.Tuple{docId, "seq"}.FDBKey()).MustGet()
+		var seq int
+		if bytes != nil {
+			// decode 64-bit little endian
+			seq = int(binary.LittleEndian.Uint64(bytes))
+		}
+
+		// save with a seq as the key
+		t.Set(tuple.Tuple{docId, "changes", seq}.FDBKey(), doc.SaveIncremental())
+
+		return nil, nil
+	})
+
+	return err
 }
