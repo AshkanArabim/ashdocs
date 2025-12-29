@@ -79,12 +79,15 @@ func (s *PebbleStorage) CreateOrLoadDoc(docId string) (*automerge.Doc, error) {
 
 	// Apply all incremental changes on top of snapshot if they exist
 	changesPrefix := makeChangesPrefix(docId)
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: changesPrefix,
+	slog.Debug("CreateOrLoadDoc: creating iterator for changes", "docId", docId, "prefix", string(changesPrefix))
+
+	// Diagnostic: list all keys with docId prefix to see what's actually stored
+	docPrefix := makeDocPrefix(docId)
+	diagIter, _ := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: docPrefix,
 		UpperBound: func() []byte {
-			// Upper bound is the prefix incremented by 1
-			upper := make([]byte, len(changesPrefix))
-			copy(upper, changesPrefix)
+			upper := make([]byte, len(docPrefix))
+			copy(upper, docPrefix)
 			for i := len(upper) - 1; i >= 0; i-- {
 				if upper[i] < 0xFF {
 					upper[i]++
@@ -95,18 +98,46 @@ func (s *PebbleStorage) CreateOrLoadDoc(docId string) (*automerge.Doc, error) {
 			return upper
 		}(),
 	})
+	if diagIter != nil {
+		var allKeys []string
+		for diagIter.First(); diagIter.Valid(); diagIter.Next() {
+			allKeys = append(allKeys, string(diagIter.Key()))
+		}
+		diagIter.Close()
+		slog.Debug("CreateOrLoadDoc: all keys with docId prefix", "docId", docId, "keys", allKeys)
+	}
+
+	// Calculate upper bound: prefix + 1 (for proper range scanning)
+	upperBound := make([]byte, len(changesPrefix))
+	copy(upperBound, changesPrefix)
+	for i := len(upperBound) - 1; i >= 0; i-- {
+		if upperBound[i] < 0xFF {
+			upperBound[i]++
+			break
+		}
+		upperBound[i] = 0
+	}
+	slog.Debug("CreateOrLoadDoc: iterator bounds", "docId", docId, "lower", string(changesPrefix), "upper", string(upperBound))
+
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: changesPrefix,
+		UpperBound: upperBound,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("CreateOrLoadDoc: failed to create iterator: %w", err)
 	}
 	defer iter.Close()
 
+	changeCount := 0
 	for iter.First(); iter.Valid(); iter.Next() {
-		slog.Debug("CreateOrLoadDoc: loading incremental change", "docId", docId, "content", string(iter.Key()))
+		changeCount++
+		slog.Debug("CreateOrLoadDoc: loading incremental change", "docId", docId, "key", string(iter.Key()), "changeNum", changeCount)
 		err := doc.LoadIncremental(iter.Value())
 		if err != nil {
 			return nil, fmt.Errorf("CreateOrLoadDoc: failed to load incremental change: %w", err)
 		}
 	}
+	slog.Debug("CreateOrLoadDoc: finished loading changes", "docId", docId, "changeCount", changeCount)
 
 	slog.Debug("CreateOrLoadDoc: loaded doc", "docId", docId, "content", doc.Root().GoString())
 
@@ -142,6 +173,7 @@ func (s *PebbleStorage) DeleteDoc(docId string) error {
 // SaveDocChanges saves document changes to the database.
 // This function should be throttled and periodically create snapshots.
 // It saves the most recent changes and periodically creates snapshots for efficiency.
+// TODO: implement snapshot creation
 func (s *PebbleStorage) SaveDocChanges(docId string, doc *automerge.Doc) error {
 	// Throttle: return early if called within 100ms of last save for this docId
 	lastSave, exists := s.lastSaveTimes[docId]
@@ -164,14 +196,18 @@ func (s *PebbleStorage) SaveDocChanges(docId string, doc *automerge.Doc) error {
 	if err == nil {
 		if seqBytes != nil {
 			seq = int(binary.BigEndian.Uint64(seqBytes))
+			slog.Debug("SaveDocChanges: read existing sequence", "docId", docId, "seq", seq)
 		}
 		closer.Close()
-	} else if err != pebble.ErrNotFound {
+	} else if err == pebble.ErrNotFound {
+		slog.Debug("SaveDocChanges: sequence key not found, starting at 0", "docId", docId)
+	} else {
 		batch.Close()
 		return fmt.Errorf("SaveDocChanges: failed to get sequence: %w", err)
 	}
 
 	seq++ // Increment sequence
+	slog.Debug("SaveDocChanges: incremented sequence", "docId", docId, "newSeq", seq)
 
 	// Update sequence number (using BigEndian for proper incremental sorting)
 	seqBytes = make([]byte, 8)
@@ -185,14 +221,16 @@ func (s *PebbleStorage) SaveDocChanges(docId string, doc *automerge.Doc) error {
 	// Save incremental change with sequence number as part of key
 	changeKey := makeChangeKey(docId, seq)
 	err = batch.Set(changeKey, doc.SaveIncremental(), nil)
-	slog.Debug("SaveDocChanges: saved incremental change with key:", "docId", docId, "content", string(changeKey))
+	slog.Debug("SaveDocChanges: saving incremental change with key", "docId", docId, "key", string(changeKey))
 	if err != nil {
 		batch.Close()
 		return fmt.Errorf("SaveDocChanges: failed to set change: %w", err)
 	}
 
-	// Commit the batch
-	err = batch.Commit(&pebble.WriteOptions{})
+	// Commit the batch with sync to ensure writes are persisted
+	err = batch.Commit(&pebble.WriteOptions{
+		Sync: true,
+	})
 	batch.Close()
 	if err != nil {
 		return fmt.Errorf("SaveDocChanges: failed to commit batch: %w", err)
