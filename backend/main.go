@@ -10,6 +10,7 @@ import (
 	"github.com/automerge/automerge-go"
 	"github.com/coder/websocket"
 	"github.com/rs/cors"
+	"golang.org/x/sync/errgroup"
 )
 
 type userReadLoopResult struct {
@@ -108,7 +109,7 @@ func userLoop(conn *websocket.Conn, serverChanged chan struct{}, syncState *auto
 
 // every document has an instance of this func running.
 // will also launch instances of userLoop for every user that connects to this doc
-func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs chan string) {
+func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs chan string, storage StorageSubsystem) (err error) {
 	slog.Debug("docLoop: starting", "docId", docId)
 	defer func() {
 		slog.Debug("docLoop: dying", "docId", docId)
@@ -116,16 +117,19 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	}()
 
 	// set up automerge server
-	// since all in memory, starting with blank doc
-	// TODO: add persistence here
-	// TODO: afer persistence, exit routine if no users connected
-	doc := automerge.New()
-	slog.Debug("docLoop: initialized automerge doc", "docId", docId)
-
 	userChanged := make(chan struct{}, 1)
 	defer close(userChanged)
 	leavingConns := make(chan *websocket.Conn, 16)
 	defer close(leavingConns)
+
+	// TODO: afer persistence, exit docLoop if no users connected
+	slog.Debug("docLoop: initialized automerge doc", "docId", docId)
+
+	// load doc from DB if it exists, or create a new blank document
+	doc, err := storage.CreateOrLoadDoc(docId)
+	if err != nil {
+		return fmt.Errorf("docLoop: failed to load doc: %w", err)
+	}
 
 	// loop for adding / removing users & merging / broadcasting changes
 	changeNotif := make(map[*websocket.Conn]chan struct{})
@@ -165,6 +169,11 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 				broadcastCount++
 			}
 			slog.Debug("docLoop: broadcast complete", "docId", docId, "recipients", broadcastCount)
+
+			err = storage.SaveDocChanges(docId, doc)
+			if err != nil {
+				slog.Error("docLoop: failed to save doc changes", "docId", docId, "error", err)
+			}
 		}
 	}
 }
@@ -173,8 +182,15 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 // receives a user connection through channel
 // creates docLoop for the target document if it doesn't exist
 // passes the user connection to the doc loop
-func docLoopManager(connsAndDocIds chan connAndDocId) {
+func docLoopManager(ctx context.Context, connsAndDocIds chan connAndDocId, eg *errgroup.Group) (err error) {
 	slog.Debug("docLoopManager: starting")
+
+	// create storage subsystem instance (establishes DB connection)
+	storage, err := NewPebbleStorage("pebble_db")
+	if err != nil {
+		return fmt.Errorf("docLoopManager: failed to create storage subsystem: %w", err)
+	}
+
 	// channel to notify when a docloop dies
 	dyingDocLoopIds := make(chan string, 16)
 	defer close(dyingDocLoopIds)
@@ -185,6 +201,8 @@ func docLoopManager(connsAndDocIds chan connAndDocId) {
 	// loop to listen on new connections
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case newConnAndDocId := <-connsAndDocIds:
 			slog.Debug("docLoopManager: new connection request", "docId", newConnAndDocId.docId, "conn", fmt.Sprintf("%p", newConnAndDocId.conn))
 			// create docLoop if DNE
@@ -196,8 +214,11 @@ func docLoopManager(connsAndDocIds chan connAndDocId) {
 				joiningConns := make(chan *websocket.Conn, 16)
 				docLoops[newConnAndDocId.docId] = joiningConns
 
-				// start the docloop
-				go docLoop(docLoops[newConnAndDocId.docId], newConnAndDocId.docId, dyingDocLoopIds)
+				// start the docloop with errgroup
+				docId := newConnAndDocId.docId
+				eg.Go(func() error {
+					return docLoop(joiningConns, docId, dyingDocLoopIds, storage)
+				})
 			} else {
 				slog.Debug("docLoopManager: docLoop already exists", "docId", newConnAndDocId.docId)
 			}
@@ -228,9 +249,16 @@ func main() {
 	const addr = ":8080"
 	slog.Debug("main: initializing server", "addr", addr)
 
+	// create context and errgroup for managing goroutines
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eg, egCtx := errgroup.WithContext(ctx)
+
 	// start doc loop manager
 	connsAndDocIds := make(chan connAndDocId, 16)
-	go docLoopManager(connsAndDocIds)
+	eg.Go(func() error {
+		return docLoopManager(egCtx, connsAndDocIds, eg)
+	})
 	slog.Debug("main: docLoopManager started")
 
 	mux := http.NewServeMux() // mux pointer
@@ -269,9 +297,20 @@ func main() {
 		Handler: cors.Default().Handler(mux),
 	}
 
-	slog.Info("Server starting", "addr", addr)
-	fmt.Printf("Listening on %s...\n", addr)
-	if err := s.ListenAndServe(); err != nil {
-		slog.Error("Server error", "error", err)
+	// start HTTP server in errgroup
+	eg.Go(func() error {
+		slog.Info("Server starting", "addr", addr)
+		fmt.Printf("Listening on %s...\n", addr)
+		if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			return fmt.Errorf("HTTP server error: %w", err)
+		}
+		return nil
+	})
+
+	// wait for any error from goroutines
+	if err := eg.Wait(); err != nil {
+		slog.Error("Fatal error, shutting down", "error", err)
+		cancel() // cancel context to signal shutdown
+		os.Exit(1)
 	}
 }
