@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/automerge/automerge-go"
 	"github.com/coder/websocket"
 	"github.com/rs/cors"
@@ -110,7 +109,7 @@ func userLoop(conn *websocket.Conn, serverChanged chan struct{}, syncState *auto
 
 // every document has an instance of this func running.
 // will also launch instances of userLoop for every user that connects to this doc
-func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs chan string, db *fdb.Database) (err error) {
+func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs chan string, storage StorageSubsystem) (err error) {
 	slog.Debug("docLoop: starting", "docId", docId)
 	defer func() {
 		slog.Debug("docLoop: dying", "docId", docId)
@@ -127,7 +126,7 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	slog.Debug("docLoop: initialized automerge doc", "docId", docId)
 
 	// load doc from DB if it exists, or create a new blank document
-	doc, err := createOrLoadDoc(db, docId)
+	doc, err := storage.CreateOrLoadDoc(docId)
 	if err != nil {
 		return fmt.Errorf("docLoop: failed to load doc: %w", err)
 	}
@@ -171,7 +170,7 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 			}
 			slog.Debug("docLoop: broadcast complete", "docId", docId, "recipients", broadcastCount)
 
-			saveDocChanges(db, docId, doc)
+			err = storage.SaveDocChanges(docId, doc)
 			if err != nil {
 				slog.Error("docLoop: failed to save doc changes", "docId", docId, "error", err)
 			}
@@ -186,10 +185,10 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 func docLoopManager(ctx context.Context, connsAndDocIds chan connAndDocId, eg *errgroup.Group) (err error) {
 	slog.Debug("docLoopManager: starting")
 
-	// start db connection to share with docLoops
-	db, err := fdb.OpenDefault()
+	// create storage subsystem instance (establishes DB connection)
+	storage, err := NewPebbleStorage("pebble_db")
 	if err != nil {
-		return fmt.Errorf("docLoopManager: failed to open FoundationDB: %w", err)
+		return fmt.Errorf("docLoopManager: failed to create storage subsystem: %w", err)
 	}
 
 	// channel to notify when a docloop dies
@@ -218,7 +217,7 @@ func docLoopManager(ctx context.Context, connsAndDocIds chan connAndDocId, eg *e
 				// start the docloop with errgroup
 				docId := newConnAndDocId.docId
 				eg.Go(func() error {
-					return docLoop(joiningConns, docId, dyingDocLoopIds, &db)
+					return docLoop(joiningConns, docId, dyingDocLoopIds, storage)
 				})
 			} else {
 				slog.Debug("docLoopManager: docLoop already exists", "docId", newConnAndDocId.docId)
