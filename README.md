@@ -8,7 +8,7 @@ https://youtu.be/KKk57I-RaHg
 <img width="850" height="525" alt="2026-01-11_20-31-04" src="https://github.com/user-attachments/assets/735db826-e1ae-4376-924f-89f20daa3bfd" />
 
 - **Frontend:** React + TS; handles the UI and sends/receives changes over WebSockets.
-- **Backend:** Implemented in Go, using WebSockets to broadcast document updates between clients.
+- **Backend:** (what you see in the sequence diagram above) Implemented in Go, using WebSockets to broadcast document updates between clients.
   - Document editing logic, including conflict resolution, incremental saving, and changelog-based reconstruction are handled by the [Automerge](https://github.com/automerge/automerge-go) library.
 - **Storage Layer:** A simple storage subsystem interface in Go abstracts document persistence.
   - Currently, there's only one storage subsystem, and it's based on [Pebble](https://github.com/cockroachdb/pebble) which is a basic key-value store. Feel free to implement your own storage subsystem (e.g. based on Redis) if needed.
