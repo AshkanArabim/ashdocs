@@ -1,4 +1,6 @@
-endpoints:
+To start the server: `go run .`
+
+# http endpoints
 - connect to a document: `/document/id`
 
 # persistence
