@@ -109,6 +109,7 @@ func userLoop(conn *websocket.Conn, serverChanged chan struct{}, syncState *auto
 
 // every document has an instance of this func running.
 // will also launch instances of userLoop for every user that connects to this doc
+// dies when no users connected to the doc (to save resources)
 func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs chan string, storage StorageSubsystem) (err error) {
 	slog.Debug("docLoop: starting", "docId", docId)
 	defer func() {
@@ -121,9 +122,6 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 	defer close(userChanged)
 	leavingConns := make(chan *websocket.Conn, 16)
 	defer close(leavingConns)
-
-	// TODO: afer persistence, exit docLoop if no users connected
-	slog.Debug("docLoop: initialized automerge doc", "docId", docId)
 
 	// load doc from DB if it exists, or create a new blank document
 	doc, err := storage.CreateOrLoadDoc(docId)
@@ -149,6 +147,11 @@ func docLoop(joiningConns chan *websocket.Conn, docId string, dyingDocLoopIDs ch
 			slog.Debug("docLoop: user leaving", "docId", docId, "conn", fmt.Sprintf("%p", conn), "activeConnections", len(changeNotif)-1)
 			close(changeNotif[conn])
 			delete(changeNotif, conn)
+
+			if len(changeNotif) == 0 {
+				slog.Debug("docLoop: no users connected, exiting", "docId", docId)
+				return nil
+			}
 
 		case <-userChanged:
 			// Receive the message using the author's syncstate
