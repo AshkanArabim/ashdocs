@@ -5,7 +5,7 @@ A basic real-time collaborative text-editor, written in Golang, with a React + T
 https://youtu.be/KKk57I-RaHg
 
 ## Architecture
-(Architecture diagram/image coming soon)
+<img width="850" height="525" alt="2026-01-11_20-31-04" src="https://github.com/user-attachments/assets/735db826-e1ae-4376-924f-89f20daa3bfd" />
 
 - **Frontend:** React + TS; handles the UI and sends/receives changes over WebSockets.
 - **Backend:** Implemented in Go, using WebSockets to broadcast document updates between clients.
