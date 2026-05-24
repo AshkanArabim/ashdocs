@@ -28,9 +28,9 @@ Benchmarked on Apple M4, single backend process. Run with `make bench` (requires
 
 | Scenario | Max error-free throughput |
 |----------|--------------------------|
-| Single doc, increasing writers (10 edits/sec each) | **~40 edits/sec** (4 users) |
-| Single doc, 25 users, increasing edit rate | **~125 edits/sec** (5 edits/sec/user) |
-| Many docs, 1–2 writers each (10 edits/sec each) | **~20 edits/sec** (1 doc) |
+| Single doc, increasing writers (10 edits/sec each) | **~160 edits/sec** (16 users; breaks at 32) |
+| Single doc, 25 users, increasing edit rate | errors appear at all tested rates (125+ edits/sec) |
+| Many docs, 1–2 writers each (10 edits/sec each) | **~467 edits/sec** (32 docs; breaks at 64) |
 
 ## Future goals
 - Implement "snapshots" to speed up reconstruction of documents with a very large edit history
