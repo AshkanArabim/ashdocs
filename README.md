@@ -21,6 +21,7 @@ Note: The higher level [automerge-repo](https://github.com/automerge/automerge-r
 - CRDT-based conflict-free merging
 - Uses Automerge-Go for state management and operational transforms
 - Modular backend allowing easy adaptation of different storage backends (see `backend/storage-subsystem-interface.go`)
+- "Snapshots" to speed up reconstruction of documents with a very large edit history
 
 ## Performance
 
@@ -33,7 +34,6 @@ Benchmarked on Apple M4, single backend process. Run with `make bench` (requires
 | Many docs, 1–2 writers each (10 edits/sec each) | **~930 edits/sec** (64 docs; breaks at 128) |
 
 ## Future goals
-- Implement "snapshots" to speed up reconstruction of documents with a very large edit history
 - Improve the scalability and persistence features of the backend storage subsystem (for multi-server deployment)
 - Expand this project to eventually do a full port of [automerge-repo](https://github.com/automerge/automerge-repo) in Golang.
 - Add user authentication and document access control for multi-user environments
