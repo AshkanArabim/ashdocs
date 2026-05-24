@@ -130,7 +130,9 @@ func (c *Client) sendSyncMessageLocked() {
 	msg, valid := c.syncState.GenerateMessage()
 	if valid {
 		bytes := msg.Bytes()
-		err := c.conn.Write(c.ctx, websocket.MessageBinary, bytes)
+		ctx, cancel := context.WithTimeout(c.ctx, 500*time.Millisecond)
+		defer cancel()
+		err := c.conn.Write(ctx, websocket.MessageBinary, bytes)
 		if err != nil {
 			atomic.AddInt64(&c.errorCount, 1)
 		}
@@ -231,11 +233,12 @@ func (c *Client) GetStats() (int64, int64) {
 
 // BenchmarkSingleDocContention tests single document with increasing users
 func BenchmarkSingleDocContention(b *testing.B) {
-	docId := "test-doc-contention"
 	serverURL := "localhost:8080"
 	fixedEditRate := 10 // edits per second per user
+	runId := rand.Int63()
 
 	for numUsers := 1; numUsers <= 50; numUsers *= 2 {
+		docId := fmt.Sprintf("test-contention-%d-%d", runId, numUsers)
 		b.Run(fmt.Sprintf("Users_%d", numUsers), func(b *testing.B) {
 			clients := make([]*Client, numUsers)
 			var err error
@@ -306,11 +309,12 @@ func BenchmarkSingleDocContention(b *testing.B) {
 
 // BenchmarkThroughputSaturation tests throughput with fixed users and increasing edit rate
 func BenchmarkThroughputSaturation(b *testing.B) {
-	docId := "test-doc-throughput"
 	serverURL := "localhost:8080"
 	fixedUsers := 25
+	runId := rand.Int63()
 
 	for editsPerSec := 5; editsPerSec <= 100; editsPerSec *= 2 {
+		docId := fmt.Sprintf("test-throughput-%d-%d", runId, editsPerSec)
 		b.Run(fmt.Sprintf("EditsPerSec_%d", editsPerSec), func(b *testing.B) {
 			clients := make([]*Client, fixedUsers)
 			var err error
@@ -384,14 +388,15 @@ func BenchmarkManyDocFanout(b *testing.B) {
 	serverURL := "localhost:8080"
 	fixedEditRate := 10 // edits per second per client
 
-	for numDocs := 1; numDocs <= 100; numDocs *= 2 {
+	for numDocs := 1; numDocs <= 1024; numDocs *= 2 {
 		b.Run(fmt.Sprintf("Docs_%d", numDocs), func(b *testing.B) {
 			var allClients []*Client
 			var wg sync.WaitGroup
 
 			// Create 1-2 clients per document
+			runId := rand.Int63()
 			for docNum := 0; docNum < numDocs; docNum++ {
-				docId := fmt.Sprintf("test-doc-fanout-%d", docNum)
+				docId := fmt.Sprintf("test-doc-fanout-%d-%d", runId, docNum)
 				numClientsForDoc := 1
 				if rand.Float32() < 0.5 {
 					numClientsForDoc = 2
@@ -456,6 +461,11 @@ func BenchmarkManyDocFanout(b *testing.B) {
 			b.ReportMetric(float64(totalEdits)/testDuration.Seconds(), "edits/sec")
 			b.ReportMetric(float64(totalEdits), "total-edits")
 			b.ReportMetric(float64(totalErrors), "errors")
+
+			// Let the server finish tearing down docLoops before the next sub-benchmark
+			// connects; without this, new connections arrive while old docLoops are
+			// mid-shutdown and get stranded on a dead joiningConns channel.
+			time.Sleep(200 * time.Millisecond)
 		})
 	}
 }
