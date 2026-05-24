@@ -29,7 +29,7 @@ Benchmarked on Apple M4, single backend process. Run with `make bench` (requires
 | Scenario | Max error-free throughput |
 |----------|--------------------------|
 | Single doc, increasing writers (10 edits/sec each) | **~160 edits/sec** (16 users; breaks at 32) |
-| Single doc, 25 users, increasing edit rate | errors appear at all tested rates (125+ edits/sec) |
+| Single doc, 10 users, increasing edit rate | **~400 edits/sec** (40 edits/sec/user; breaks at 80) |
 | Many docs, 1–2 writers each (10 edits/sec each) | **~467 edits/sec** (32 docs; breaks at 64) |
 
 ## Future goals

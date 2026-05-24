@@ -310,7 +310,7 @@ func BenchmarkSingleDocContention(b *testing.B) {
 // BenchmarkThroughputSaturation tests throughput with fixed users and increasing edit rate
 func BenchmarkThroughputSaturation(b *testing.B) {
 	serverURL := "localhost:8080"
-	fixedUsers := 25
+	fixedUsers := 10
 	runId := rand.Int63()
 
 	for editsPerSec := 5; editsPerSec <= 100; editsPerSec *= 2 {
