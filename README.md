@@ -22,6 +22,16 @@ Note: The higher level [automerge-repo](https://github.com/automerge/automerge-r
 - Uses Automerge-Go for state management and operational transforms
 - Modular backend allowing easy adaptation of different storage backends (see `backend/storage-subsystem-interface.go`)
 
+## Performance
+
+Benchmarked on Apple M4, single backend process. Run with `make bench` (requires backend running).
+
+| Scenario | Max error-free throughput |
+|----------|--------------------------|
+| Single doc, increasing writers (10 edits/sec each) | **~40 edits/sec** (4 users) |
+| Single doc, 25 users, increasing edit rate | **~125 edits/sec** (5 edits/sec/user) |
+| Many docs, 1–2 writers each (10 edits/sec each) | **~20 edits/sec** (1 doc) |
+
 ## Future goals
 - Implement "snapshots" to speed up reconstruction of documents with a very large edit history
 - Improve the scalability and persistence features of the backend storage subsystem (for multi-server deployment)
